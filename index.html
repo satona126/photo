@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8">
-  <title>写真を撮ろう</title>
+  <title>3D Hand Frame Capture</title>
   <style>
     body {
       margin: 0;
@@ -73,7 +73,7 @@
     // -----------------------------------------
     const scene = new THREE.Scene();
     const fov = 45;
-    const cameraZ = 15; // カメラのZ位置(メートル換算)
+    const cameraZ = 15;
     const camera3D = new THREE.PerspectiveCamera(fov, width / height, 0.1, 100);
     camera3D.position.set(0, 0, cameraZ);
     camera3D.lookAt(0, 0, 0);
@@ -82,14 +82,12 @@
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
 
-    // ガラスのような光沢を出すためのライティング
     const ambientLight = new THREE.AmbientLight(0xffffff, 1.4);
     scene.add(ambientLight);
     const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
     dirLight.position.set(5, 10, 12);
     scene.add(dirLight);
 
-    // 画面の2Dピクセル座標を3Dワールド座標(Z=0平面)に変換するためのスケール計算
     function getWorldViewSize() {
       const vFov = (fov * Math.PI) / 180;
       const worldHeight = 2 * Math.tan(vFov / 2) * cameraZ;
@@ -117,7 +115,6 @@
     // 2. Cannon-es (現実準拠の3D物理演算)
     // -----------------------------------------
     const world = new CANNON.World();
-    // 現実の重力加速度 (-9.82 m/s^2) に少しスケール感を合わせたリアルな重力
     world.gravity.set(0, -14.0, 0);
     world.broadphase = new CANNON.NaiveBroadphase();
     world.solver.iterations = 10;
@@ -125,11 +122,10 @@
     const physicsMat = new CANNON.Material('glass');
     const contactMat = new CANNON.ContactMaterial(physicsMat, physicsMat, {
       friction: 0.5,
-      restitution: 0.25 // 適度な跳ね返り
+      restitution: 0.25
     });
     world.addContactMaterial(contactMat);
 
-    // 画面下部の透明な地面・壁（奥行き方向にも壁を作って手前や奥に落ちすぎないようにする）
     const groundBody = new CANNON.Body({ mass: 0, material: physicsMat });
     groundBody.addShape(new CANNON.Plane());
     groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
@@ -154,34 +150,31 @@
     const blocks = [];
 
     function create3DPhotoBlock(rect) {
-      // 【手が写らない工夫】指の太さ分だけわずかに内側をトリミングする
-      const padX = Math.min(rect.w * 0.14, 24);
-      const padY = Math.min(rect.h * 0.14, 24);
+      // 指がわずかにかかる外周だけ最小限トリミングし、大きなサイズのまま切り抜く
+      const padX = Math.min(rect.w * 0.04, 12);
+      const padY = Math.min(rect.h * 0.04, 12);
       const cropX = rect.x + padX;
       const cropY = rect.y + padY;
-      const cropW = Math.max(20, rect.w - padX * 2);
-      const cropH = Math.max(20, rect.h - padY * 2);
+      const cropW = Math.max(40, rect.w - padX * 2);
+      const cropH = Math.max(40, rect.h - padY * 2);
 
-      // テクスチャ用キャンバス作成
       const texCanvas = document.createElement('canvas');
       texCanvas.width = 512;
       texCanvas.height = 512;
       const tCtx = texCanvas.getContext('2d');
 
-      // 現在のカメラ映像を描画しつつ、手が検出されていない時に記憶したクリーン背景をブレンド
-      // (指がもし枠内に入っていても、手の領域を記憶背景で補完する)
+      // 現在のカメラ映像を描画
       tCtx.drawImage(bgCanvas, cropX, cropY, cropW, cropH, 0, 0, 512, 512);
       
-      // 検出されている手のランドマーク周辺をクリーンな背景画像で置き換えて手を消す
+      // 枠のフチにかかった指だけをクリーン背景で消す（内側の被写体は消さないように小さめの半径にする）
       if (detectedHands.length > 0 && hasCleanBg) {
         tCtx.save();
         detectedHands.forEach(landmarks => {
           landmarks.forEach(pt => {
             const p = toCanvasCoord(pt);
-            // テクスチャ座標系に変換
             const tx = ((p.x - cropX) / cropW) * 512;
             const ty = ((p.y - cropY) / cropH) * 512;
-            const radius = (65 / cropW) * 512; // 指・手のひらを覆う半径
+            const radius = (38 / cropW) * 512;
 
             tCtx.beginPath();
             tCtx.arc(tx, ty, radius, 0, Math.PI * 2);
@@ -197,16 +190,15 @@
       const texture = new THREE.CanvasTexture(texCanvas);
       texture.colorSpace = THREE.SRGBColorSpace;
 
-      // 3Dサイズ計算
+      // 3Dサイズ計算（画面上の見た目の大きさをそのまま反映）
       const w3D = (rect.w / width) * worldWidth;
       const h3D = (rect.h / height) * worldHeight;
-      const d3D = Math.min(w3D, h3D) * 0.55; // 立体的な厚み
+      const d3D = Math.min(w3D, h3D) * 0.45;
 
-      // 透明感のあるガラスブロック風マテリアル（前面・背面は写真、側面は半透明ガラス）
       const photoMat = new THREE.MeshPhysicalMaterial({
         map: texture,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.88,
         roughness: 0.15,
         metalness: 0.05,
         clearcoat: 1.0,
@@ -222,48 +214,43 @@
         clearcoat: 1.0
       });
 
-      // BoxGeometryの6面: [+x, -x, +y, -y, +z(前面), -z(背面)]
       const materials = [sideMat, sideMat, sideMat, sideMat, photoMat, photoMat];
       const geometry = new THREE.BoxGeometry(w3D, h3D, d3D);
       const mesh = new THREE.Mesh(geometry, materials);
 
-      // エッジ（白い輪郭線）を追加して透明ブロック感を強調
       const edges = new THREE.EdgesGeometry(geometry);
       const line = new THREE.LineSegments(
         edges,
-        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 })
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
       );
       mesh.add(line);
 
-      // 出現位置（撮影した場所）
       const centerPos = screenToWorld(rect.x + rect.w / 2, rect.y + rect.h / 2);
       mesh.position.copy(centerPos);
       scene.add(mesh);
 
-      // Cannon-es 剛体
       const shape = new CANNON.Box(new CANNON.Vec3(w3D / 2, h3D / 2, d3D / 2));
       const body = new CANNON.Body({
-        mass: 2.0, // しっかりした重さ
+        mass: 2.0,
         material: physicsMat,
         linearDamping: 0.05,
         angularDamping: 0.15
       });
       body.addShape(shape);
       body.position.set(centerPos.x, centerPos.y, 0);
-      // 少しだけ傾きを与えて落ちたときに立体的に見えるようにする
-      body.angularVelocity.set((Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 1.5, (Math.random() - 0.5) * 1.0);
+      body.angularVelocity.set((Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 1.2, (Math.random() - 0.5) * 0.8);
       world.addBody(body);
 
       blocks.push({ mesh, body, w3D, h3D, d3D });
     }
 
     // -----------------------------------------
-    // 4. MediaPipe Hands & ジェスチャー判定
+    // 4. MediaPipe Hands & ジェスチャー判定（大きくても反応するよう緩和）
     // -----------------------------------------
     let detectedHands = [];
     let hasCleanBg = false;
     let frameHoldCount = 0;
-    const HOLD_THRESHOLD = 22;
+    const HOLD_THRESHOLD = 18; // 少し早くシャッターが切れるように調整
     let cooldown = 0;
     let flashAlpha = 0;
     const grabbedMap = new Map();
@@ -281,22 +268,21 @@
 
     function isFingerExtended(landmarks, tipIdx, pipIdx) {
       const wrist = landmarks[0];
-      return dist(landmarks[tipIdx], wrist) > dist(landmarks[pipIdx], wrist) * 1.12;
+      return dist(landmarks[tipIdx], wrist) > dist(landmarks[pipIdx], wrist) * 1.05;
     }
 
-    // イラスト通りの手の向き・形を判定
+    // 大きくフレームを作ったときでも反応するゆったりした判定
     function checkIllustrationFramePose(h1, h2) {
-      // 両手とも親指・人差し指が伸びて、中指・薬指・小指が曲がっているか
+      // 親指と人差し指が伸びていて、小指・薬指が曲がっていればOK（中指は多少浮いていても許容）
       const checkL = (lm) => {
         return isFingerExtended(lm, 4, 2) &&
                isFingerExtended(lm, 8, 6) &&
-               !isFingerExtended(lm, 12, 10) &&
                !isFingerExtended(lm, 16, 14) &&
                !isFingerExtended(lm, 20, 18);
       };
       if (!checkL(h1) || !checkL(h2)) return null;
 
-      // 画面上の位置で左手・右手を判別
+      // 画面上のX座標で左手・右手を判別
       const c1 = toCanvasCoord(h1[0]);
       const c2 = toCanvasCoord(h2[0]);
       const leftHand = c1.x < c2.x ? h1 : h2;
@@ -310,35 +296,31 @@
       const rIndexMcp = toCanvasCoord(rightHand[5]);
       const rThumbTip = toCanvasCoord(rightHand[4]);
 
-      // 【イラストの形チェック】
-      // 左手（画面左）：人差し指は上向き（指先Y < 付け根Y）、親指は右向き（指先X > 人差し指付け根X）
-      const leftPoseOk = (lIndexTip.y < lIndexMcp.y - 20) && (lThumbTip.x > lIndexMcp.x + 20);
-      // 右手（画面右）：人差し指は左向き（指先X < 付け根X）、親指は下向き（指先Y > 人差し指付け根Y）
-      const rightPoseOk = (rIndexTip.x < rIndexMcp.x - 20) && (rThumbTip.y > rIndexMcp.y + 20);
+      // 左手（画面左）：人差し指が上向き、親指が右向き
+      const leftPoseOk = (lIndexTip.y < lIndexMcp.y) && (lThumbTip.x > lIndexMcp.x);
+      // 右手（画面右）：人差し指が左向き、親指が下向き
+      const rightPoseOk = (rIndexTip.x < rIndexMcp.x) && (rThumbTip.y > rIndexMcp.y);
 
       if (!leftPoseOk || !rightPoseOk) return null;
 
-      // 左上角（左手人差し指先 と 右手人差し指先）と右下角（左手親指先 と 右手親指先）が近づいているか
-      const touchThreshold = Math.min(width, height) * 0.14;
+      // 【大幅緩和】指先同士が離れていても、大きな四角形を形作っていればOKにする
+      // 許容距離を画面サイズの45%まで拡大
+      const looseTouchThreshold = Math.min(width, height) * 0.45;
       const topLeftDist = dist(lIndexTip, rIndexTip);
       const bottomRightDist = dist(lThumbTip, rThumbTip);
 
-      if (topLeftDist < touchThreshold && bottomRightDist < touchThreshold) {
-        // 4本の指が作る内側の赤い四角形領域を算出
-        const x1 = Math.max(lIndexTip.x, lIndexMcp.x);
-        const x2 = Math.min(rIndexMcp.x, rThumbTip.x);
-        const y1 = Math.max(rIndexTip.y, rIndexMcp.y);
-        const y2 = Math.min(lThumbTip.y, lIndexMcp.y);
-
-        const minX = Math.min(x1, x2);
-        const maxX = Math.max(x1, x2);
-        const minY = Math.min(y1, y2);
-        const maxY = Math.max(y1, y2);
+      // 左右の手の位置関係が逆転していないかチェック（左手が左、右手が右）
+      if (topLeftDist < looseTouchThreshold && bottomRightDist < looseTouchThreshold && lIndexTip.x < rThumbTip.x) {
+        // 4本の指の先端・付け根から大きなフレーム矩形を算出
+        const minX = Math.min(lIndexTip.x, lIndexMcp.x);
+        const maxX = Math.max(rThumbTip.x, rIndexMcp.x);
+        const minY = Math.min(rIndexTip.y, rIndexMcp.y, lIndexTip.y);
+        const maxY = Math.max(lThumbTip.y, lIndexMcp.y, rThumbTip.y);
 
         const w = maxX - minX;
         const h = maxY - minY;
 
-        if (w > 45 && h > 45) {
+        if (w > 60 && h > 60) {
           return { x: minX, y: minY, w, h };
         }
       }
@@ -351,8 +333,8 @@
     hands.setOptions({
       maxNumHands: 2,
       modelComplexity: 1,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.7
+      minDetectionConfidence: 0.65,
+      minTrackingConfidence: 0.65
     });
     hands.onResults((results) => {
       detectedHands = results.multiHandLandmarks || [];
@@ -376,7 +358,6 @@
       requestAnimationFrame(animate);
       const dt = Math.min(clock.getDelta(), 0.05);
 
-      // 物理ステップ進行（サブステップを使って高速落下でも地面をすり抜けないようにする）
       world.step(1 / 60, dt, 4);
 
       // 1. カメラ映像の描画
@@ -397,7 +378,6 @@
       if (video.readyState >= 2) {
         bgCtx.drawImage(video, drawX, drawY, drawW, drawH);
 
-        // 手が画面に映っていない瞬間は、クリーン背景キャッシュを更新する
         if (detectedHands.length === 0) {
           cleanBgCtx.drawImage(bgCanvas, 0, 0);
           hasCleanBg = true;
@@ -416,19 +396,19 @@
         frameHoldCount++;
         const progress = Math.min(frameHoldCount / HOLD_THRESHOLD, 1);
 
-        // イラストと同じ赤い斜線フレームのプレビュー表示
+        // 赤いフレームのプレビュー表示
         bgCtx.save();
         bgCtx.strokeStyle = `rgba(255, 60, 60, ${0.5 + progress * 0.5})`;
-        bgCtx.lineWidth = 3 + progress * 3;
+        bgCtx.lineWidth = 3 + progress * 4;
         bgCtx.strokeRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
-        bgCtx.fillStyle = `rgba(255, 60, 60, ${progress * 0.25})`;
+        bgCtx.fillStyle = `rgba(255, 60, 60, ${progress * 0.22})`;
         bgCtx.fillRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
         bgCtx.restore();
 
         if (frameHoldCount >= HOLD_THRESHOLD) {
           create3DPhotoBlock(frameRect);
           frameHoldCount = 0;
-          cooldown = 40;
+          cooldown = 35;
           flashAlpha = 0.75;
         }
       } else {
@@ -447,7 +427,6 @@
           y: (thumbTip.y + indexTip.y) / 2
         };
 
-        // 指先マーカー
         bgCtx.save();
         bgCtx.fillStyle = 'rgba(0, 255, 210, 0.8)';
         bgCtx.beginPath();
@@ -463,7 +442,6 @@
           activeHandIndices.add(idx);
 
           if (!grabbedMap.has(idx)) {
-            // 3Dブロックのスクリーン投影位置とピンチ位置を比較して掴む
             for (let i = blocks.length - 1; i >= 0; i--) {
               const b = blocks[i];
               const alreadyGrabbed = Array.from(grabbedMap.values()).some(g => g.block === b);
@@ -479,7 +457,6 @@
                   prevWorldPos: worldTarget.clone(),
                   velocity: new CANNON.Vec3(0, 0, 0)
                 });
-                // 掴んでいる間はKINEMATIC（重力無視で直接位置制御）にする
                 b.body.type = CANNON.Body.KINEMATIC;
                 b.body.velocity.set(0, 0, 0);
                 b.body.angularVelocity.set(0, 0, 0);
@@ -493,7 +470,6 @@
             const b = grabData.block;
             const targetWorld = screenToWorld(pinchCenter.x, pinchCenter.y);
 
-            // 離したときの投げる速度を計算
             grabData.velocity.set(
               (targetWorld.x - grabData.prevWorldPos.x) * 35,
               (targetWorld.y - grabData.prevWorldPos.y) * 35,
@@ -506,7 +482,6 @@
         }
       });
 
-      // ピンチ解除されたブロックをDYNAMIC（重力落下）に戻す
       for (const [idx, grabData] of grabbedMap.entries()) {
         if (!activeHandIndices.has(idx)) {
           const b = grabData.block;
@@ -519,7 +494,6 @@
 
       // 4. 物理ボディの位置・回転を3Dメッシュに同期
       blocks.forEach((b) => {
-        // Z軸方向に飛び出しすぎないよう軽く制限
         if (Math.abs(b.body.position.z) > 2.5) {
           b.body.position.z = Math.sign(b.body.position.z) * 2.5;
           b.body.velocity.z *= -0.3;
@@ -540,7 +514,6 @@
       renderer.render(scene, camera3D);
     }
 
-    // リサイズ対応
     window.addEventListener('resize', () => {
       width = window.innerWidth;
       height = window.innerHeight;

@@ -16,7 +16,7 @@
       width: 100vw;
       height: 100vh;
     }
-    video, #cleanBgCanvas {
+    video {
       display: none;
     }
     canvas.layer {
@@ -44,8 +44,6 @@
 <body>
   <div id="container">
     <video id="video" playsinline></video>
-    <!-- 手が写っていない時の背景記憶用キャンバス -->
-    <canvas id="cleanBgCanvas"></canvas>
     <!-- カメラ映像・ガイド描画用2Dキャンバス -->
     <canvas id="bgCanvas" class="layer"></canvas>
     <!-- 3D物理ブロック描画用キャンバス -->
@@ -59,14 +57,12 @@
     const video = document.getElementById('video');
     const bgCanvas = document.getElementById('bgCanvas');
     const bgCtx = bgCanvas.getContext('2d');
-    const cleanBgCanvas = document.getElementById('cleanBgCanvas');
-    const cleanBgCtx = cleanBgCanvas.getContext('2d');
     const threeCanvas = document.getElementById('threeCanvas');
 
     let width = window.innerWidth;
     let height = window.innerHeight;
-    bgCanvas.width = cleanBgCanvas.width = width;
-    bgCanvas.height = cleanBgCanvas.height = height;
+    bgCanvas.width = width;
+    bgCanvas.height = height;
 
     // -----------------------------------------
     // 1. Three.js (3Dシーン・カメラ・ライト)
@@ -82,9 +78,9 @@
     renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio);
 
-    const ambientLight = new THREE.AmbientLight(0xffffff, 1.4);
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.5);
     scene.add(ambientLight);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
     dirLight.position.set(5, 10, 12);
     scene.add(dirLight);
 
@@ -145,54 +141,25 @@
     world.addBody(rightWallBody);
 
     // -----------------------------------------
-    // 3. 3D写真ブロック生成関数
+    // 3. 3D写真ブロック生成関数（加工なし＆約半分の大きさ）
     // -----------------------------------------
     const blocks = [];
 
     function create3DPhotoBlock(rect) {
-      // 指がわずかにかかる外周だけ最小限トリミングし、大きなサイズのまま切り抜く
-      const padX = Math.min(rect.w * 0.04, 12);
-      const padY = Math.min(rect.h * 0.04, 12);
-      const cropX = rect.x + padX;
-      const cropY = rect.y + padY;
-      const cropW = Math.max(40, rect.w - padX * 2);
-      const cropH = Math.max(40, rect.h - padY * 2);
-
+      // 加工せず、カメラ映像の赤い枠内をそのまま切り抜く
       const texCanvas = document.createElement('canvas');
-      texCanvas.width = 512;
-      texCanvas.height = 512;
+      texCanvas.width = rect.w;
+      texCanvas.height = rect.h;
       const tCtx = texCanvas.getContext('2d');
-
-      // 現在のカメラ映像を描画
-      tCtx.drawImage(bgCanvas, cropX, cropY, cropW, cropH, 0, 0, 512, 512);
-      
-      // 枠のフチにかかった指だけをクリーン背景で消す（内側の被写体は消さないように小さめの半径にする）
-      if (detectedHands.length > 0 && hasCleanBg) {
-        tCtx.save();
-        detectedHands.forEach(landmarks => {
-          landmarks.forEach(pt => {
-            const p = toCanvasCoord(pt);
-            const tx = ((p.x - cropX) / cropW) * 512;
-            const ty = ((p.y - cropY) / cropH) * 512;
-            const radius = (38 / cropW) * 512;
-
-            tCtx.beginPath();
-            tCtx.arc(tx, ty, radius, 0, Math.PI * 2);
-            tCtx.clip();
-            tCtx.drawImage(cleanBgCanvas, cropX, cropY, cropW, cropH, 0, 0, 512, 512);
-            tCtx.restore();
-            tCtx.save();
-          });
-        });
-        tCtx.restore();
-      }
+      tCtx.drawImage(bgCanvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
 
       const texture = new THREE.CanvasTexture(texCanvas);
       texture.colorSpace = THREE.SRGBColorSpace;
 
-      // 3Dサイズ計算（画面上の見た目の大きさをそのまま反映）
-      const w3D = (rect.w / width) * worldWidth;
-      const h3D = (rect.h / height) * worldHeight;
+      // ブロックの大きさを撮影範囲の約半分（0.5倍）にする
+      const scaleFactor = 0.5;
+      const w3D = (rect.w / width) * worldWidth * scaleFactor;
+      const h3D = (rect.h / height) * worldHeight * scaleFactor;
       const d3D = Math.min(w3D, h3D) * 0.45;
 
       const photoMat = new THREE.MeshPhysicalMaterial({
@@ -221,17 +188,18 @@
       const edges = new THREE.EdgesGeometry(geometry);
       const line = new THREE.LineSegments(
         edges,
-        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85 })
       );
       mesh.add(line);
 
+      // 撮影した枠の中心位置から出現
       const centerPos = screenToWorld(rect.x + rect.w / 2, rect.y + rect.h / 2);
       mesh.position.copy(centerPos);
       scene.add(mesh);
 
       const shape = new CANNON.Box(new CANNON.Vec3(w3D / 2, h3D / 2, d3D / 2));
       const body = new CANNON.Body({
-        mass: 2.0,
+        mass: 1.5,
         material: physicsMat,
         linearDamping: 0.05,
         angularDamping: 0.15
@@ -245,12 +213,11 @@
     }
 
     // -----------------------------------------
-    // 4. MediaPipe Hands & ジェスチャー判定（大きくても反応するよう緩和）
+    // 4. MediaPipe Hands & L字ポーズ判定
     // -----------------------------------------
     let detectedHands = [];
-    let hasCleanBg = false;
     let frameHoldCount = 0;
-    const HOLD_THRESHOLD = 18; // 少し早くシャッターが切れるように調整
+    const HOLD_THRESHOLD = 18;
     let cooldown = 0;
     let flashAlpha = 0;
     const grabbedMap = new Map();
@@ -268,21 +235,21 @@
 
     function isFingerExtended(landmarks, tipIdx, pipIdx) {
       const wrist = landmarks[0];
-      return dist(landmarks[tipIdx], wrist) > dist(landmarks[pipIdx], wrist) * 1.05;
+      return dist(landmarks[tipIdx], wrist) > dist(landmarks[pipIdx], wrist) * 1.08;
     }
 
-    // 大きくフレームを作ったときでも反応するゆったりした判定
-    function checkIllustrationFramePose(h1, h2) {
-      // 親指と人差し指が伸びていて、小指・薬指が曲がっていればOK（中指は多少浮いていても許容）
-      const checkL = (lm) => {
+    // 両手がつながっていなくても、両手がL字になっていればその範囲を撮影する
+    function checkTwoHandsLFrame(h1, h2) {
+      // L字判定：親指(4)と人差し指(8)が伸びていて、薬指(16)・小指(20)が曲がっている
+      const isL = (lm) => {
         return isFingerExtended(lm, 4, 2) &&
                isFingerExtended(lm, 8, 6) &&
                !isFingerExtended(lm, 16, 14) &&
                !isFingerExtended(lm, 20, 18);
       };
-      if (!checkL(h1) || !checkL(h2)) return null;
+      if (!isL(h1) || !isL(h2)) return null;
 
-      // 画面上のX座標で左手・右手を判別
+      // 画面上の位置で左側の手・右側の手を判別
       const c1 = toCanvasCoord(h1[0]);
       const c2 = toCanvasCoord(h2[0]);
       const leftHand = c1.x < c2.x ? h1 : h2;
@@ -296,33 +263,36 @@
       const rIndexMcp = toCanvasCoord(rightHand[5]);
       const rThumbTip = toCanvasCoord(rightHand[4]);
 
-      // 左手（画面左）：人差し指が上向き、親指が右向き
+      // 左手（画面左）：人差し指が上向き（指先Y < 付け根Y）、親指が右向き（指先X > 付け根X）
       const leftPoseOk = (lIndexTip.y < lIndexMcp.y) && (lThumbTip.x > lIndexMcp.x);
-      // 右手（画面右）：人差し指が左向き、親指が下向き
+      // 右手（画面右）：人差し指が左向き（指先X < 付け根X）、親指が下向き（指先Y > 付け根Y）
       const rightPoseOk = (rIndexTip.x < rIndexMcp.x) && (rThumbTip.y > rIndexMcp.y);
 
       if (!leftPoseOk || !rightPoseOk) return null;
 
-      // 【大幅緩和】指先同士が離れていても、大きな四角形を形作っていればOKにする
-      // 許容距離を画面サイズの45%まで拡大
-      const looseTouchThreshold = Math.min(width, height) * 0.45;
-      const topLeftDist = dist(lIndexTip, rIndexTip);
-      const bottomRightDist = dist(lThumbTip, rThumbTip);
+      // 両手のL字が作る外側の基準座標
+      const outerMinX = Math.min(lIndexTip.x, lIndexMcp.x);
+      const outerMaxX = Math.max(rThumbTip.x, rIndexMcp.x);
+      const outerMinY = Math.min(rIndexTip.y, rIndexMcp.y, lIndexTip.y);
+      const outerMaxY = Math.max(lThumbTip.y, lIndexMcp.y, rThumbTip.y);
 
-      // 左右の手の位置関係が逆転していないかチェック（左手が左、右手が右）
-      if (topLeftDist < looseTouchThreshold && bottomRightDist < looseTouchThreshold && lIndexTip.x < rThumbTip.x) {
-        // 4本の指の先端・付け根から大きなフレーム矩形を算出
-        const minX = Math.min(lIndexTip.x, lIndexMcp.x);
-        const maxX = Math.max(rThumbTip.x, rIndexMcp.x);
-        const minY = Math.min(rIndexTip.y, rIndexMcp.y, lIndexTip.y);
-        const maxY = Math.max(lThumbTip.y, lIndexMcp.y, rThumbTip.y);
+      const outerW = outerMaxX - outerMinX;
+      const outerH = outerMaxY - outerMinY;
 
-        const w = maxX - minX;
-        const h = maxY - minY;
+      // 【手が写らない工夫】指の太さ分だけ内側に縮小した枠を撮影範囲とする
+      const marginX = Math.max(28, outerW * 0.16);
+      const marginY = Math.max(28, outerH * 0.16);
 
-        if (w > 60 && h > 60) {
-          return { x: minX, y: minY, w, h };
-        }
+      const minX = outerMinX + marginX;
+      const maxX = outerMaxX - marginX;
+      const minY = outerMinY + marginY;
+      const maxY = outerMaxY - marginY;
+
+      const w = maxX - minX;
+      const h = maxY - minY;
+
+      if (w > 40 && h > 40) {
+        return { x: minX, y: minY, w, h };
       }
       return null;
     }
@@ -360,7 +330,7 @@
 
       world.step(1 / 60, dt, 4);
 
-      // 1. カメラ映像の描画
+      // 1. カメラ映像の描画（左右反転・加工なし）
       bgCtx.save();
       bgCtx.scale(-1, 1);
       bgCtx.translate(-width, 0);
@@ -377,18 +347,13 @@
       }
       if (video.readyState >= 2) {
         bgCtx.drawImage(video, drawX, drawY, drawW, drawH);
-
-        if (detectedHands.length === 0) {
-          cleanBgCtx.drawImage(bgCanvas, 0, 0);
-          hasCleanBg = true;
-        }
       }
       bgCtx.restore();
 
-      // 2. 両手フレームポーズ判定と撮影
+      // 2. 両手L字ポーズ判定と撮影
       let frameRect = null;
       if (detectedHands.length === 2 && cooldown <= 0) {
-        frameRect = checkIllustrationFramePose(detectedHands[0], detectedHands[1]);
+        frameRect = checkTwoHandsLFrame(detectedHands[0], detectedHands[1]);
       }
       if (cooldown > 0) cooldown--;
 
@@ -396,16 +361,23 @@
         frameHoldCount++;
         const progress = Math.min(frameHoldCount / HOLD_THRESHOLD, 1);
 
-        // 赤いフレームのプレビュー表示
+        // 撮影される範囲（指の内側の赤い枠）を表示
         bgCtx.save();
-        bgCtx.strokeStyle = `rgba(255, 60, 60, ${0.5 + progress * 0.5})`;
-        bgCtx.lineWidth = 3 + progress * 4;
+        bgCtx.strokeStyle = `rgba(255, 60, 60, ${0.55 + progress * 0.45})`;
+        bgCtx.lineWidth = 3 + progress * 3;
         bgCtx.strokeRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
-        bgCtx.fillStyle = `rgba(255, 60, 60, ${progress * 0.22})`;
+        bgCtx.fillStyle = `rgba(255, 60, 60, ${progress * 0.2})`;
         bgCtx.fillRect(frameRect.x, frameRect.y, frameRect.w, frameRect.h);
         bgCtx.restore();
 
+        // シャッターが切れる瞬間は枠線を消してから純粋な映像だけをキャプチャする
         if (frameHoldCount >= HOLD_THRESHOLD) {
+          bgCtx.save();
+          bgCtx.scale(-1, 1);
+          bgCtx.translate(-width, 0);
+          bgCtx.drawImage(video, drawX, drawY, drawW, drawH);
+          bgCtx.restore();
+
           create3DPhotoBlock(frameRect);
           frameHoldCount = 0;
           cooldown = 35;
@@ -448,7 +420,7 @@
               if (alreadyGrabbed) continue;
 
               const screenPos = worldToScreen(b.mesh.position);
-              const hitRadius = (Math.max(b.w3D, b.h3D) / worldWidth) * width * 0.65;
+              const hitRadius = Math.max(35, (Math.max(b.w3D, b.h3D) / worldWidth) * width * 0.75);
 
               if (dist(screenPos, pinchCenter) < hitRadius) {
                 const worldTarget = screenToWorld(pinchCenter.x, pinchCenter.y);
@@ -517,8 +489,8 @@
     window.addEventListener('resize', () => {
       width = window.innerWidth;
       height = window.innerHeight;
-      bgCanvas.width = cleanBgCanvas.width = width;
-      bgCanvas.height = cleanBgCanvas.height = height;
+      bgCanvas.width = width;
+      bgCanvas.height = height;
 
       camera3D.aspect = width / height;
       camera3D.updateProjectionMatrix();
